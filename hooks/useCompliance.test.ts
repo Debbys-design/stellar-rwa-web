@@ -102,4 +102,78 @@ describe('useCompliance', () => {
     );
     expect(stateUpdateWarnings).toHaveLength(0);
   });
+
+  it('does not leak stale-network data when the network switches mid-session', async () => {
+    // Simulate a testnet lookup that resolves after the user has already
+    // switched to mainnet. The stale testnet result must not surface.
+    let resolveTestnet: (value: unknown) => void = () => {};
+    mockGetCompliance.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveTestnet = resolve;
+      }),
+    );
+
+    const { result, rerender } = renderHook(
+      ({ address, network }: { address: string; network: string }) =>
+        useCompliance(address, network),
+      { initialProps: { address: 'GABC123', network: 'testnet' } },
+    );
+
+    expect(mockGetCompliance).toHaveBeenCalledTimes(1);
+
+    // Switch network while the testnet lookup is still in flight.
+    mockGetCompliance.mockResolvedValueOnce({ compliant: false });
+    rerender({ address: 'GABC123', network: 'mainnet' });
+
+    await waitFor(() => {
+      expect(mockGetCompliance).toHaveBeenCalledTimes(2);
+    });
+
+    // Now let the stale testnet lookup settle; it must be ignored.
+    resolveTestnet({ compliant: true });
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    // The mainnet result wins; the stale testnet result never leaks through.
+    expect(result.current.compliance).toEqual({ compliant: false });
+  });
+
+  it('does not show cached testnet data after switching to mainnet', async () => {
+    mockGetCompliance.mockResolvedValueOnce({ compliant: true });
+
+    const { result, rerender } = renderHook(
+      ({ address, network }: { address: string; network: string }) =>
+        useCompliance(address, network),
+      { initialProps: { address: 'GABC123', network: 'testnet' } },
+    );
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+    expect(result.current.compliance).toEqual({ compliant: true });
+
+    // Switch to mainnet; the new lookup is still pending.
+    let resolveMainnet: (value: unknown) => void = () => {};
+    mockGetCompliance.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveMainnet = resolve;
+      }),
+    );
+    rerender({ address: 'GABC123', network: 'mainnet' });
+
+    // While the mainnet lookup is in flight, stale testnet data must not be shown.
+    await waitFor(() => {
+      expect(result.current.loading).toBe(true);
+    });
+    expect(result.current.compliance).toBeNull();
+
+    resolveMainnet({ compliant: false });
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+    expect(result.current.compliance).toEqual({ compliant: false });
+  });
 });
