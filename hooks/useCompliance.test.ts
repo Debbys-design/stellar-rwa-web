@@ -1,5 +1,5 @@
 import { renderHook, waitFor } from '@testing-library/react';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { useCompliance } from './useCompliance';
 
 const mockGetCompliance = vi.fn();
@@ -11,6 +11,10 @@ vi.mock('@/lib/contracts', () => ({
 describe('useCompliance', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it('surfaces a rejected compliance lookup as readable error state', async () => {
@@ -65,5 +69,37 @@ describe('useCompliance', () => {
     await waitFor(() => {
       expect(mockGetCompliance).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it('does not warn about state updates when unmounted during an in-flight call', async () => {
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    let resolveLookup: (value: unknown) => void = () => {};
+    mockGetCompliance.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveLookup = resolve;
+      }),
+    );
+
+    const { unmount } = renderHook(() => useCompliance('GABC123'));
+
+    expect(mockGetCompliance).toHaveBeenCalledTimes(1);
+
+    // Unmount while the async lookup is still pending, then let it settle.
+    unmount();
+    resolveLookup({ compliant: true });
+
+    // Flush pending microtasks so any post-unmount state update would fire.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const stateUpdateWarnings = consoleErrorSpy.mock.calls.filter((args) =>
+      args.some(
+        (arg) =>
+          typeof arg === 'string' &&
+          /state update on an unmounted component|Can't perform a React state update/i.test(arg),
+      ),
+    );
+    expect(stateUpdateWarnings).toHaveLength(0);
   });
 });
